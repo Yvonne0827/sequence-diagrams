@@ -1,1 +1,50 @@
-ss
+sequenceDiagram
+    autonumber
+
+    participant Chat Widget
+
+    box rgb(255,250,240) Event Push Service
+        participant event-push-api
+        participant action-event-consumer
+    end
+
+    participant Redis
+    participant Kafka
+
+    %% ---------- SSE Connection ----------
+    Chat Widget->>event-push-api: GET /sse/{session_id}?client_id={client_id}
+    event-push-api->>Redis: GET sse_count:{client_id}
+    Redis-->>event-push-api: currentCount
+
+    alt currentCount < 5
+        event-push-api->>Redis: INCR sse_count:{client_id}
+        Redis-->>event-push-api: newCount
+        event-push-api->>Redis: SUBSCRIBE channel:{session_id}
+        Note right of event-push-api: Allow SSE connection
+    else currentCount >= 5
+        event-push-api-->>Chat Widget: HTTP 204 No Content
+        Note right of event-push-api: Return No Content <br>(client will not reconnect again)
+    end
+
+    %% ---------- Kafka Event Consumption ----------
+    Kafka->>action-event-consumer: Consume action event
+    Note left of Kafka: {"session_id": "...", "rule_id": "...", ...}
+
+    %% ---------- Event Processing and Pub/Sub Publish ----------
+    action-event-consumer->>Redis: PUBLISH channel:{session_id} {processed event message}
+
+    %% ---------- Redis Pub/Sub ----------
+    Redis-->>event-push-api: Receive message from channel:{session_id}
+    Note right of event-push-api: Match subscription → push to matching SSE FluxSink
+
+    %% ---------- SSE Push to Browser ----------
+    loop While SSE connection is open
+        event-push-api-->>Chat Widget: SSE: ServerSentEvent(data)
+    end
+
+    %% ---------- Disconnect Cleanup ----------
+    alt SSE disconnects (tab closed, refresh, network lost)
+        event-push-api->>Redis: UNSUBSCRIBE channel:{session_id}
+        event-push-api->>Redis: DECR sse_count:{client_id}
+        Note right of event-push-api: Clean up subscription and update count
+    end
